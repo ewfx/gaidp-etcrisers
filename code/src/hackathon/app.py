@@ -12,7 +12,6 @@ import iso4217parse  # For currency code validation
 
 app = Flask(__name__)
 
-
 # Configure API key - in production, use environment variables
 # Google provides free credits for Gemini API
 client = genai.Client(api_key="AIzaSyCufTlSlTUnx81XekgXMfrRcAtULUGoMus")  # Replace with your Gemini API key
@@ -163,7 +162,7 @@ def validate_data(df: pd.DataFrame, rules: List[Dict[str, Any]]) -> Dict[int, Li
             columns = rule.get('columns', [])
             condition = rule.get('condition')
             parameters = rule.get('parameters', {})
-            error_message = rule.get('error_message')
+            error_message = rule.get('error_message', 'Validation error')  # Default message if not provided
             
             print(f"\n  Checking {rule_type} rule for columns: {columns}")
             
@@ -190,9 +189,9 @@ def validate_data(df: pd.DataFrame, rules: List[Dict[str, Any]]) -> Dict[int, Li
             
             if not valid:
                 error = {
-                    'columns': columns,
+                    'columns': ', '.join(columns),  # Join columns into a string
                     'values': {col: str(row[col]) for col in columns if col in df.columns},
-                    'error': f"{error_message} {additional_info}".strip()
+                    'error': f"{error_message}. {additional_info}".strip()
                 }
                 row_errors.append(error)
                 print(f"  ❌ Adding error: {error['error']}")

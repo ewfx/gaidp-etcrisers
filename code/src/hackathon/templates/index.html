@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CSV Validator</title>
+    <title>Regulatory Compliance Validation for Transactions</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         .error-row {
@@ -31,7 +31,7 @@
 </head>
 <body>
     <div class="container mt-5">
-        <h1 class="mb-4">CSV Validator</h1>
+        <h4 class="mb-4 align-items-center">Regulatory Compliance Validation for Transactions</h4>
         
         <div class="card mb-4">
             <div class="card-header">
@@ -42,7 +42,7 @@
                     <div class="row">
                         <div class="col-md-6">
                             <div class="file-upload">
-                                <h6>CSV File</h6>
+                                <h6>Transactions File (CSV File)</h6>
                                 <input type="file" class="form-control" id="csvFile" name="csv_file" accept=".csv">
                             </div>
                         </div>
@@ -54,6 +54,7 @@
                         </div>
                     </div>
                     <button type="submit" class="btn btn-primary">Validate</button>
+                    <button type="reset" class="btn btn-secondary">Clear</button>
                     <div id="loadingSpinner" class="spinner-border text-primary ms-2" role="status">
                         <span class="visually-hidden">Loading...</span>
                     </div>
@@ -98,8 +99,8 @@
                         <div class="card-body rules-preview">
                             <ul id="rulesList"></ul>
                         </div>
-                    </div>
-                </div>
+                    </div> 
+                </div> 
             </div>
         </div>
         
@@ -107,10 +108,7 @@
             <div class="card mb-4">
                 <div class="card-header d-flex justify-content-between align-items-center">
                     <h5>Error Details</h5>
-                    <div>
-                        <button id="exportCorrectedBtn" class="btn btn-success me-2">Save Corrections</button>
-                        <button id="downloadCorrectedBtn" class="btn btn-primary" disabled>Download Corrected CSV</button>
-                    </div>
+                    <button id="downloadCorrectedBtn" class="btn btn-primary" disabled>Download Corrected CSV</button>
                 </div>
                 <div class="card-body">
                     <div class="table-responsive">
@@ -120,7 +118,6 @@
                                     <th>Row</th>
                                     <th>Data</th>
                                     <th>Errors</th>
-                                    <th>Actions</th>
                                 </tr>
                             </thead>
                             <tbody id="errorsBody"></tbody>
@@ -139,7 +136,6 @@
             const resultsSection = document.getElementById('resultsSection');
             const errorsSection = document.getElementById('errorsSection');
             const viewErrorsBtn = document.getElementById('viewErrorsBtn');
-            const exportCorrectedBtn = document.getElementById('exportCorrectedBtn');
             const downloadCorrectedBtn = document.getElementById('downloadCorrectedBtn');
             
             let currentCorrections = {};
@@ -291,7 +287,7 @@
                         
                         const tdValue = document.createElement('td');
                         // Check if this column has errors
-                        const hasError = rowData.errors.some(err => err.column === column);
+                        const hasError = rowData.errors.some(err => err.columns.includes(column));
                         
                         if (hasError) {
                             const input = document.createElement('input');
@@ -325,30 +321,23 @@
                     
                     rowData.errors.forEach(error => {
                         const li = document.createElement('li');
-                        li.textContent = `${error.column}: ${error.error}`;
+                        // Split the error message and display only the part after the colon
+                        const errorMessage = error.error.split(':').pop().trim();
+                        li.textContent = errorMessage;
                         errorsList.appendChild(li);
                     });
                     
                     tdErrors.appendChild(errorsList);
                     tr.appendChild(tdErrors);
                     
-                    // Actions column
-                    const tdActions = document.createElement('td');
-                    const ignoreBtn = document.createElement('button');
-                    ignoreBtn.className = 'btn btn-sm btn-secondary';
-                    ignoreBtn.textContent = 'Ignore';
-                    ignoreBtn.addEventListener('click', function() {
-                        tr.style.display = 'none';
-                    });
-                    
-                    tdActions.appendChild(ignoreBtn);
-                    tr.appendChild(tdActions);
-                    
                     errorsBody.appendChild(tr);
                 });
+                
+                // Enable the download button once errors are displayed
+                downloadCorrectedBtn.disabled = false;
             }
             
-            exportCorrectedBtn.addEventListener('click', function() {
+            downloadCorrectedBtn.addEventListener('click', function() {
                 fetch('/export_corrected', {
                     method: 'POST',
                     headers: {
@@ -366,15 +355,11 @@
                     }
                     
                     alert(data.message);
-                    downloadCorrectedBtn.disabled = false;
+                    window.location.href = '/download_corrected';
                 })
                 .catch(error => {
                     alert('Error: ' + error);
                 });
-            });
-            
-            downloadCorrectedBtn.addEventListener('click', function() {
-                window.location.href = '/download_corrected';
             });
         });
     </script>
