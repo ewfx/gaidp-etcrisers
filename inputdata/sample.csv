@@ -1,0 +1,5 @@
+﻿Customer_ID,Account_Balance,Transaction_Amount,Reported_Amount,Currency,Country,Transaction_Date,Risk_Score
+1001,15000,500,500,USD,US,25-02-2026,3
+1002,32000,1200,1200,EUR,DE,20-02-2025,2
+1003,-5000,300,300,GBP,UK,18-02-2025,6
+1004,70000,2000,1800,USD,US,28-02-2025,5
