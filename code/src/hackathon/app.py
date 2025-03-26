@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 import re
 from typing import Dict, List, Any
 import iso4217parse  # For currency code validation
+import PyPDF2
+import csv
 
 app = Flask(__name__)
 
@@ -35,20 +37,31 @@ def upload_files():
     if csv_file.filename == '' or rules_file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
     
-    csv_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(csv_file.filename))
-    rules_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(rules_file.filename))
+    # Validate rules file extension
+    allowed_extensions = {'.txt', '.csv', '.pdf'}
+    rules_ext = os.path.splitext(rules_file.filename)[1].lower()
+    if rules_ext not in allowed_extensions:
+        return jsonify({'error': 'Rules file must be .txt, .csv, or .pdf'}), 400
     
-    csv_file.save(csv_path)
-    rules_file.save(rules_path)
-    
-    # Process files
     try:
-        df = pd.read_csv(csv_path)
-        with open(rules_path, 'r') as f:
-            rules_text = f.read()
+        # Save uploaded files
+        csv_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(csv_file.filename))
+        rules_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(rules_file.filename))
         
-        # Parse rules using Google's Gemini API
-        structured_rules = parse_rules_with_llm(rules_text, list(df.columns))
+        csv_file.save(csv_path)
+        rules_file.save(rules_path)
+        
+        # Process files
+        df = pd.read_csv(csv_path)
+        
+        # Extract rules from file
+        raw_rules_text = extract_rules_from_file(rules_path)
+        
+        # Convert to plain English format
+        normalized_rules = normalize_rules_to_english(raw_rules_text, list(df.columns))
+        
+        # Parse rules into structured format
+        structured_rules = parse_rules_with_llm(normalized_rules, list(df.columns))
         
         # Validate data
         validation_results = validate_data(df, structured_rules)
@@ -65,136 +78,270 @@ def upload_files():
             }
         }
         
-        # Save validation results and file paths for later retrieval
+        # Save validation results for later use
         session_data = {
             'csv_path': csv_path,
-            'validation_results': validation_results
+            'validation_results': {str(k): v for k, v in validation_results.items()}
         }
         
         temp_session_file = os.path.join(app.config['UPLOAD_FOLDER'], 'session.json')
         with open(temp_session_file, 'w') as f:
-            # Convert keys to strings since JSON requires string keys
-            serializable_results = {str(k): v for k, v in validation_results.items()}
-            json.dump({'csv_path': csv_path, 'validation_results': serializable_results}, f)
+            json.dump(session_data, f)
         
         return jsonify({
-            'preview': preview,
-            'validation_results': {str(k): v for k, v in validation_results.items()}
+            'preview': preview
         })
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-def parse_rules_with_llm(rules_text, columns):
-    """
-    Enhanced rule parsing to support complex business rules
-    """
+def extract_rules_from_file(file_path: str) -> str:
+    """Extract rules text from different file formats"""
+    file_extension = os.path.splitext(file_path)[1].lower()
+    
     try:
-        prompt = f"""
-        Convert the following complex banking validation rules into a structured JSON format.
-        The CSV file has these columns: {', '.join(columns)}
-        
-        Rules:
-        {rules_text}
-        
-        Create a JSON array where each rule is an object with:
-        1. "type": The type of validation ("amount_match", "balance", "currency", "country", "date", etc.)
-        2. "column": The main column(s) the rule applies to
-        3. "condition": The validation condition
-        4. "parameters": Additional parameters needed for validation
-        5. "error_message": Clear error message
-        
-        Example format:
-        [
-            {{
-                "type": "amount_match",
-                "columns": ["Transaction_Amount", "Reported_Amount"],
-                "condition": "match_with_tolerance",
-                "parameters": {{
-                    "tolerance_percentage": 1.0,
-                    "cross_currency_flag_column": "Is_Cross_Currency"
-                }},
-                "error_message": "Transaction amount mismatch exceeds permitted tolerance"
-            }}
-        ]
-        
-        Return ONLY the JSON with no explanation.
-        """
-        
+        if file_extension == '.txt':
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return f.read()
+                
+        elif file_extension == '.csv':
+            rules_text = []
+            with open(file_path, 'r', encoding='utf-8') as f:
+                csv_reader = csv.reader(f)
+                headers = next(csv_reader, None)  # Skip header row if exists
+                for row in csv_reader:
+                    if row:  # Skip empty rows
+                        rules_text.append(' '.join(str(cell) for cell in row if cell))
+            return '\n'.join(rules_text)
+            
+        elif file_extension == '.pdf':
+            rules_text = []
+            with open(file_path, 'rb') as f:
+                pdf_reader = PyPDF2.PdfReader(f)
+                for page in pdf_reader.pages:
+                    rules_text.append(page.extract_text())
+            return '\n'.join(rules_text)
+            
+        else:
+            raise ValueError(f"Unsupported file format: {file_extension}")
+            
+    except Exception as e:
+        raise Exception(f"Error reading rules file: {str(e)}")
+
+def normalize_rules_to_english(rules_text: str, columns: List[str]) -> str:
+    """Convert rules to plain English format using Gemini"""
+    prompt = f"""
+    Convert the following data validation rules into clear, plain English statements.
+    The data has these columns: {', '.join(columns)}
+    
+    Original rules:
+    {rules_text}
+    
+    Convert each rule into a clear statement following this format:
+    - Rule Type: [type of validation]
+    - Columns: [affected columns]
+    - Condition: [what needs to be validated]
+    - Error Message: [what to show if validation fails]
+    
+    Example:
+    - Rule Type: amount_match
+    - Columns: Transaction_Amount, Reported_Amount
+    - Condition: Values should match within 1% tolerance for cross-currency transactions
+    - Error Message: Transaction amount mismatch exceeds permitted tolerance
+    
+    Please convert ALL rules to this format, maintaining their business logic.
+    """
+    
+    try:
         response = client.models.generate_content(
-            model="gemini-2.0-flash", contents=prompt
+            model="gemini-2.0-flash",
+            contents=prompt
+        )
+        return response.text
+        
+    except Exception as e:
+        raise Exception(f"Error normalizing rules: {str(e)}")
+
+def parse_rules_with_llm(rules_text: str, columns: List[str]) -> List[Dict]:
+    """Parse normalized rules into structured JSON format"""
+    prompt = f"""
+    Convert these plain English validation rules into a structured JSON format.
+    Available columns: {', '.join(columns)}
+
+    You MUST use ONLY the following rule types:
+    1. "amount_match" - For comparing monetary amounts
+       Parameters: {{"tolerance_percentage": float, "cross_currency_flag_column": string}}
+    
+    2. "balance" - For account balance validation
+       Parameters: {{"min_balance": float, "account_type_column": string}}
+    
+    3. "currency" - For currency code and cross-border validations
+       Parameters: {{"cross_border_limit": float, "documentation_threshold": float}}
+    
+    4. "country" - For country-specific validations
+       Parameters: {{"accepted_countries": [string], "high_risk_countries": [string]}}
+    
+    5. "date" - For date-related validations
+       Parameters: {{"max_age_days": int, "max_value_date_diff_days": int, "exclude_weekends": boolean}}
+    
+    6. "required_field" - For mandatory field validation
+       Parameters: {{}} (no additional parameters needed)
+    
+    7. "numeric_range" - For number range validation
+       Parameters: {{"min": float, "max": float}}
+    
+    8. "format" - For pattern/regex validation
+       Parameters: {{"pattern": string}}
+    
+    9. "dependency" - For related field validation
+       Parameters: {{"condition": "required"|"matching"}}
+    
+    10. "unique" - For uniqueness validation
+       Parameters: {{}} (no additional parameters needed)
+
+    Rules to convert:
+    {rules_text}
+
+    Convert to this JSON structure:
+    [
+        {{
+            "type": "one_of_above_types",
+            "columns": ["affected_columns"],
+            "condition": "validation_condition",
+            "parameters": {{ "param_key": "param_value" }},
+            "error_message": "clear_error_message"
+        }}
+    ]
+
+    Important:
+    - Use ONLY the rule types listed above
+    - Include appropriate parameters for each rule type
+    - Make error messages clear and specific
+    - Ensure column names match the available columns
+    - Return ONLY the JSON array, no explanation
+
+    Return ONLY the JSON array, no explanation.
+    """
+    
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt
         )
         
         # Extract and parse JSON from response
         content = response.text
-        import re
         json_match = re.search(r'\[.*\]', content, re.DOTALL)
         if json_match:
-            structured_rules = json.loads(json_match.group(0))
+            rules = json.loads(json_match.group(0))
         else:
-            structured_rules = json.loads(content.strip())
+            rules = json.loads(content.strip())
+        
+        # Validate that all rules use supported types
+        supported_types = {
+            "amount_match", "balance", "currency", "country", "date",
+            "required_field", "numeric_range", "format", "dependency", "unique"
+        }
+        
+        for rule in rules:
+            if rule.get('type', '').lower() not in supported_types:
+                raise ValueError(f"Unsupported rule type: {rule.get('type')}")
+        
+        return rules
             
-        return structured_rules
-    
     except Exception as e:
-        print(f"Error parsing rules: {e}")
-        return []
+        raise Exception(f"Error parsing rules: {str(e)}")
 
 def validate_data(df: pd.DataFrame, rules: List[Dict[str, Any]]) -> Dict[int, List[Dict[str, str]]]:
     """
-    Enhanced validation function supporting complex banking rules
+    Enhanced validation function with descriptive error messages
     """
     validation_results = {}
     print("\n=== Starting Validation ===")
     
-    # Preprocess date columns
-    date_columns = ['Transaction_Date']  # Add other date columns as needed
-    for col in date_columns:
-        if col in df.columns:
+    # Preprocess date columns and other data types
+    date_columns = ['Transaction_Date', 'Value_Date', 'Settlement_Date']  # Add all possible date columns
+    numeric_columns = ['Transaction_Amount', 'Reported_Amount', 'Account_Balance', 'Exchange_Rate']
+    
+    # Data type preprocessing
+    for col in df.columns:
+        if col in date_columns:
             df[col] = pd.to_datetime(df[col], errors='coerce')
+        elif col in numeric_columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
     
     for index, row in df.iterrows():
         print(f"\nValidating Row {index + 1}:")
         row_errors = []
         
         for rule in rules:
-            rule_type = rule.get('type')
-            columns = rule.get('columns', [])
-            condition = rule.get('condition')
-            parameters = rule.get('parameters', {})
-            error_message = rule.get('error_message', 'Validation error')  # Default message if not provided
+            try:
+                rule_type = rule.get('type', '').lower()
+                columns = rule.get('columns', [])
+                condition = rule.get('condition', '')
+                parameters = rule.get('parameters', {})
+                
+                # Create descriptive error message based on rule type
+                error_description = get_rule_description(rule_type, condition, parameters)
+                correction_guidance = get_correction_guidance(rule_type, parameters)
+                
+                print(f"\n  Checking {rule_type} rule for columns: {columns}")
+                
+                # Validate required columns exist
+                if not all(col in df.columns for col in columns):
+                    missing_cols = [col for col in columns if col not in df.columns]
+                    print(f"  ⚠️ Missing columns: {missing_cols}")
+                    continue
+                
+                valid = True
+                additional_info = ""
+                
+                # Enhanced validation based on rule type
+                if rule_type == "amount_match":
+                    valid, additional_info = validate_amount_match(row, parameters)
+                    
+                elif rule_type == "balance":
+                    valid, additional_info = validate_balance(row, parameters)
+                    
+                elif rule_type == "currency":
+                    valid, additional_info = validate_currency(row, parameters)
+                    
+                elif rule_type == "country":
+                    valid, additional_info = validate_country(row, parameters)
+                    
+                elif rule_type == "date":
+                    valid, additional_info = validate_date(row, parameters)
+                    
+                elif rule_type == "required_field":
+                    valid, additional_info = validate_required_field(row, columns)
+                    
+                elif rule_type == "numeric_range":
+                    valid, additional_info = validate_numeric_range(row, columns[0], parameters)
+                    
+                elif rule_type == "format":
+                    valid, additional_info = validate_format(row, columns[0], parameters)
+                    
+                elif rule_type == "dependency":
+                    valid, additional_info = validate_dependency(row, columns, parameters)
+                    
+                elif rule_type == "unique":
+                    valid, additional_info = validate_unique(df, row, columns[0], index)
+                
+                if not valid:
+                    error = {
+                        'columns': ', '.join(columns),
+                        'values': {col: str(row[col]) for col in columns if col in df.columns},
+                        'rule_description': error_description,
+                        'correction_guidance': correction_guidance,
+                        'validation_details': additional_info
+                    }
+                    row_errors.append(error)
+                    print(f"  ❌ Rule violated: {error_description}")
+                    print(f"     Correction needed: {correction_guidance}")
             
-            print(f"\n  Checking {rule_type} rule for columns: {columns}")
-            
-            # Validate required columns exist
-            if not all(col in df.columns for col in columns):
-                missing_cols = [col for col in columns if col not in df.columns]
-                print(f"  ⚠️ Missing columns: {missing_cols}")
+            except Exception as e:
+                print(f"  ⚠️ Error processing rule: {str(e)}")
                 continue
-            
-            valid = True
-            additional_info = ""
-            
-            # Apply appropriate validation based on rule type
-            if rule_type == "amount_match":
-                valid, additional_info = validate_amount_match(row, parameters)
-            elif rule_type == "balance":
-                valid, additional_info = validate_balance(row, parameters)
-            elif rule_type == "currency":
-                valid, additional_info = validate_currency(row, parameters)
-            elif rule_type == "country":
-                valid, additional_info = validate_country(row, parameters)
-            elif rule_type == "date":
-                valid, additional_info = validate_date(row, parameters)
-            
-            if not valid:
-                error = {
-                    'columns': ', '.join(columns),  # Join columns into a string
-                    'values': {col: str(row[col]) for col in columns if col in df.columns},
-                    'error': f"{error_message}. {additional_info}".strip()
-                }
-                row_errors.append(error)
-                print(f"  ❌ Adding error: {error['error']}")
         
         if row_errors:
             validation_results[index] = row_errors
@@ -202,88 +349,164 @@ def validate_data(df: pd.DataFrame, rules: List[Dict[str, Any]]) -> Dict[int, Li
         else:
             print(f"  ✅ Row {index + 1} passed all validations")
     
-    print("\n=== Validation Complete ===")
-    print(f"Total rows with errors: {len(validation_results)}")
     return validation_results
 
 def validate_amount_match(row: pd.Series, parameters: Dict) -> tuple[bool, str]:
-    """Validates transaction amount matching with tolerance for cross-currency"""
+    """Enhanced amount matching validation"""
     try:
         trans_amt = float(row['Transaction_Amount'])
         rep_amt = float(row['Reported_Amount'])
-        tolerance = parameters.get('tolerance_percentage', 1.0) / 100
-        is_cross_currency = row.get(parameters.get('cross_currency_flag_column', 'Is_Cross_Currency'), False)
+        tolerance = float(parameters.get('tolerance_percentage', 1.0)) / 100
+        is_cross_currency = bool(row.get(parameters.get('cross_currency_flag_column', 'Is_Cross_Currency'), False))
+        
+        # Handle zero amounts
+        if trans_amt == 0 and rep_amt == 0:
+            return True, ""
+        
+        # Avoid division by zero
+        max_amount = max(abs(trans_amt), abs(rep_amt))
+        if max_amount == 0:
+            return False, "Invalid amount: zero value detected"
+        
+        difference_percentage = abs(trans_amt - rep_amt) / max_amount
         
         if is_cross_currency:
-            # Allow tolerance for cross-currency transactions
-            difference_percentage = abs(trans_amt - rep_amt) / max(abs(trans_amt), abs(rep_amt))
-            valid = difference_percentage <= tolerance
-            info = f"Difference: {difference_percentage:.2%}" if not valid else ""
-        else:
-            # Exact match required for same currency
-            valid = abs(trans_amt - rep_amt) < 0.01  # Account for floating point precision
-            info = f"Difference: {abs(trans_amt - rep_amt):.2f}" if not valid else ""
+            # Check if exchange rate is provided
+            if 'Exchange_Rate' in row:
+                exchange_rate = float(row['Exchange_Rate'])
+                adjusted_amount = trans_amt * exchange_rate
+                difference_percentage = abs(adjusted_amount - rep_amt) / max(abs(adjusted_amount), abs(rep_amt))
+        
+        valid = difference_percentage <= tolerance
+        info = f"Difference: {difference_percentage:.2%} (tolerance: {tolerance:.2%})" if not valid else ""
         
         return valid, info
     except Exception as e:
-        return False, f"Validation error: {str(e)}"
+        return False, f"Amount validation error: {str(e)}"
 
-def validate_balance(row: pd.Series, parameters: Dict) -> tuple[bool, str]:
-    """Validates account balance with overdraft consideration"""
+def validate_required_field(row: pd.Series, columns: List[str]) -> tuple[bool, str]:
+    """Validate required fields are not empty"""
     try:
-        balance = float(row['Account_Balance'])
-        is_od_account = str(row.get('Account_Type', '')).upper() == 'OD'
-        
-        if balance < 0 and not is_od_account:
-            return False, f"Negative balance ({balance:.2f}) in non-overdraft account"
+        for column in columns:
+            value = row[column]
+            if pd.isna(value) or str(value).strip() == "":
+                return False, f"Required field '{column}' is empty"
         return True, ""
     except Exception as e:
-        return False, f"Validation error: {str(e)}"
+        return False, f"Required field validation error: {str(e)}"
+
+def validate_numeric_range(row: pd.Series, column: str, parameters: Dict) -> tuple[bool, str]:
+    """Validate numeric value falls within specified range"""
+    try:
+        value = float(row[column])
+        min_value = float(parameters.get('min', float('-inf')))
+        max_value = float(parameters.get('max', float('inf')))
+        
+        if value < min_value:
+            return False, f"Value {value} is below minimum {min_value}"
+        if value > max_value:
+            return False, f"Value {value} exceeds maximum {max_value}"
+        
+        return True, ""
+    except Exception as e:
+        return False, f"Numeric range validation error: {str(e)}"
+
+def validate_format(row: pd.Series, column: str, parameters: Dict) -> tuple[bool, str]:
+    """Validate field format using regex patterns"""
+    try:
+        value = str(row[column])
+        pattern = parameters.get('pattern', '')
+        if not pattern:
+            return True, ""
+        
+        if not re.match(pattern, value):
+            return False, f"Value '{value}' does not match required format"
+        
+        return True, ""
+    except Exception as e:
+        return False, f"Format validation error: {str(e)}"
+
+def validate_dependency(row: pd.Series, columns: List[str], parameters: Dict) -> tuple[bool, str]:
+    """Validate dependent field relationships"""
+    try:
+        main_field = columns[0]
+        dependent_field = columns[1]
+        condition = parameters.get('condition', 'required')
+        
+        main_value = row[main_field]
+        dependent_value = row[dependent_field]
+        
+        if condition == 'required':
+            if not pd.isna(main_value) and pd.isna(dependent_value):
+                return False, f"'{dependent_field}' is required when '{main_field}' is present"
+        elif condition == 'matching':
+            if not pd.isna(main_value) and not pd.isna(dependent_value):
+                if str(main_value) != str(dependent_value):
+                    return False, f"'{dependent_field}' must match '{main_field}'"
+        
+        return True, ""
+    except Exception as e:
+        return False, f"Dependency validation error: {str(e)}"
+
+def validate_unique(df: pd.DataFrame, row: pd.Series, column: str, current_index: int) -> tuple[bool, str]:
+    """Validate field uniqueness across the dataset"""
+    try:
+        value = row[column]
+        if pd.isna(value):
+            return True, ""
+        
+        # Check for duplicates excluding current row
+        duplicate_mask = (df[column] == value) & (df.index != current_index)
+        if duplicate_mask.any():
+            duplicate_indices = df.index[duplicate_mask].tolist()
+            return False, f"Duplicate value found in rows: {[i+1 for i in duplicate_indices]}"
+        
+        return True, ""
+    except Exception as e:
+        return False, f"Uniqueness validation error: {str(e)}"
 
 def validate_currency(row: pd.Series, parameters: Dict) -> tuple[bool, str]:
-    """Validates currency codes and cross-border transaction limits"""
+    """Enhanced currency validation"""
     try:
         currency = str(row['Currency'])
         amount = float(row['Transaction_Amount'])
         
         # Validate ISO 4217 currency code
         try:
-            iso4217parse.parse(currency)
-            currency_valid = True
+            currency_info = iso4217parse.parse(currency)
+            if not currency_info:
+                return False, f"Invalid currency code: {currency}"
         except ValueError:
             return False, f"Invalid currency code: {currency}"
         
         # Check cross-border transaction limits
-        if row.get('Is_Cross_Border', False):
+        is_cross_border = bool(row.get('Is_Cross_Border', False))
+        if is_cross_border:
             limit = float(parameters.get('cross_border_limit', float('inf')))
             if amount > limit:
                 return False, f"Amount {amount} exceeds cross-border limit of {limit}"
+            
+            # Check for required documentation
+            if amount > float(parameters.get('documentation_threshold', 10000)):
+                if not row.get('Documentation_Reference'):
+                    return False, "Missing documentation reference for large cross-border transaction"
+        
+        # Validate currency pairs for cross-currency transactions
+        if row.get('Counter_Currency'):
+            counter_currency = str(row['Counter_Currency'])
+            try:
+                counter_currency_info = iso4217parse.parse(counter_currency)
+                if not counter_currency_info:
+                    return False, f"Invalid counter currency code: {counter_currency}"
+            except ValueError:
+                return False, f"Invalid counter currency code: {counter_currency}"
         
         return True, ""
     except Exception as e:
-        return False, f"Validation error: {str(e)}"
-
-def validate_country(row: pd.Series, parameters: Dict) -> tuple[bool, str]:
-    """Validates country and cross-border transaction requirements"""
-    try:
-        country = str(row['Country'])
-        amount = float(row['Transaction_Amount'])
-        accepted_countries = parameters.get('accepted_countries', [])
-        
-        if accepted_countries and country not in accepted_countries:
-            return False, f"Country {country} not in accepted list"
-        
-        # Check for mandatory remarks on large cross-border transactions
-        if amount > 10000 and row.get('Is_Cross_Border', False):
-            if not row.get('Transaction_Remarks'):
-                return False, "Missing mandatory remarks for large cross-border transaction"
-        
-        return True, ""
-    except Exception as e:
-        return False, f"Validation error: {str(e)}"
+        return False, f"Currency validation error: {str(e)}"
 
 def validate_date(row: pd.Series, parameters: Dict) -> tuple[bool, str]:
-    """Validates transaction dates"""
+    """Enhanced date validation"""
     try:
         trans_date = row['Transaction_Date']
         if not isinstance(trans_date, pd.Timestamp):
@@ -296,13 +519,106 @@ def validate_date(row: pd.Series, parameters: Dict) -> tuple[bool, str]:
             return False, "Transaction date is in the future"
         
         # Check old transactions
+        max_age_days = int(parameters.get('max_age_days', 365))
         days_old = (today - trans_date).days
-        if days_old > 365:
-            return False, f"Transaction is {days_old} days old"
+        if days_old > max_age_days:
+            return False, f"Transaction is {days_old} days old (max allowed: {max_age_days})"
+        
+        # Check value date if present
+        if 'Value_Date' in row:
+            value_date = row['Value_Date']
+            if isinstance(value_date, pd.Timestamp):
+                max_value_date_diff = int(parameters.get('max_value_date_diff_days', 5))
+                date_diff = abs((value_date - trans_date).days)
+                if date_diff > max_value_date_diff:
+                    return False, f"Value date differs from transaction date by {date_diff} days (max allowed: {max_value_date_diff})"
+        
+        # Check for weekend/holiday processing if specified
+        if parameters.get('exclude_weekends', False):
+            if trans_date.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+                return False, "Transaction date falls on weekend"
         
         return True, ""
     except Exception as e:
-        return False, f"Validation error: {str(e)}"
+        return False, f"Date validation error: {str(e)}"
+
+def get_rule_description(rule_type: str, condition: str, parameters: Dict) -> str:
+    """Generate descriptive explanation of the validation rule"""
+    descriptions = {
+        "amount_match": (
+            f"Amounts must match within {parameters.get('tolerance_percentage', 1)}% tolerance"
+            f"{' for cross-currency transactions' if parameters.get('cross_currency_flag_column') else ''}"
+        ),
+        "balance": (
+            f"Account balance must be at least {parameters.get('min_balance', 0)} "
+            f"for {parameters.get('account_type_column', 'all')} accounts"
+        ),
+        "currency": (
+            f"Currency must be valid ISO code. "
+            f"Cross-border transactions limited to {parameters.get('cross_border_limit', 'unlimited')}. "
+            f"Documentation required above {parameters.get('documentation_threshold', 10000)}"
+        ),
+        "country": (
+            f"Country must be in accepted list: {parameters.get('accepted_countries', [])}. "
+            f"Additional checks for high-risk countries: {parameters.get('high_risk_countries', [])}"
+        ),
+        "date": (
+            f"Date must be valid, not future, within {parameters.get('max_age_days', 365)} days old"
+            f"{', excluding weekends' if parameters.get('exclude_weekends') else ''}"
+        ),
+        "required_field": "Field is mandatory and cannot be empty",
+        "numeric_range": (
+            f"Value must be between {parameters.get('min', '-∞')} and {parameters.get('max', '∞')}"
+        ),
+        "format": f"Value must match pattern: {parameters.get('pattern', 'any')}",
+        "dependency": (
+            "Fields must satisfy dependency condition: "
+            f"{parameters.get('condition', 'required')}"
+        ),
+        "unique": "Value must be unique across all records"
+    }
+    return descriptions.get(rule_type, "Unknown validation rule")
+
+def get_correction_guidance(rule_type: str, parameters: Dict) -> str:
+    """Generate guidance on how to correct the validation error"""
+    guidance = {
+        "amount_match": (
+            "Ensure the amounts match within the specified tolerance. "
+            "For cross-currency transactions, verify the exchange rate is correct."
+        ),
+        "balance": (
+            "Adjust the account balance to meet the minimum requirement "
+            "for the specified account type."
+        ),
+        "currency": (
+            "Use valid ISO currency code. For cross-border transactions, "
+            "ensure proper documentation and stay within limits."
+        ),
+        "country": (
+            "Use a country from the accepted list. For high-risk countries, "
+            "ensure additional documentation is provided."
+        ),
+        "date": (
+            "Enter a valid date that is not in the future and within the allowed age range. "
+            "For value dates, ensure they are within permitted difference from transaction date."
+        ),
+        "required_field": (
+            "Provide a non-empty value for this mandatory field."
+        ),
+        "numeric_range": (
+            f"Enter a number between {parameters.get('min', '-∞')} and {parameters.get('max', '∞')}."
+        ),
+        "format": (
+            "Enter the value in the correct format according to the specified pattern."
+        ),
+        "dependency": (
+            "Ensure related fields are properly filled according to the dependency rules."
+        ),
+        "unique": (
+            "Provide a unique value that is not used in any other record."
+        )
+    }
+    return guidance.get(rule_type, "Please review and correct the data according to validation rules.")
 
 @app.route('/get_errors', methods=['GET'])
 def get_errors():
