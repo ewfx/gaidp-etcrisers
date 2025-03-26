@@ -1,0 +1,5 @@
+Transaction_Amount should always match Reported Amount, except when the transaction involves cross-currency conversions, in which case a permissible deviation of up to 1% is allowed.
+Account Balance should never be negative, except in cases of overdraft accounts explicitly marked with an "OD" flag.
+Currency should be a valid ISO 4217 currency code, and the transaction must adhere to cross-border transaction limits as per regulatory guidelines.
+Country should be an accepted jurisdiction based on bank regulations, and cross- border transactions should include mandatory transaction remarks if the amount exceeds $10,000.
+Transaction_Date should not be in the future, and transactions older than 365 days should trigger a data validation alert.
