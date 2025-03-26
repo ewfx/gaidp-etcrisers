@@ -97,3 +97,63 @@ This project is a web application for validating CSV files against a set of rule
 - pandas
 - google-genai
 - iso4217parse
+
+## Arch Flow
+
+**Pre-flow**
+- Collect regulatory documents as attachments (pdf/word/csv) from user 
+- Collect tx data set as attachment (csv) from user 
+- data collection should happen via a chat assistant / UI (interactive possibly NLP (yet to implement))
+- Store this data (regulatory documents/text plus data set)
+- docs stored as objects in object storage and data in nosql.
+
+**Stage 1**
+- Textual Content Extraction
+- Textual Content Preprocessing
+- Textual Content Sizeable Token Slicing
+
+**Stage 2**
+- Extract Regulatory Reporting Instructions.
+  - Fetch regulatory reporting document content from Datastore
+  - Make Gemini API call by sending this content as input, receive list of regulatory reporting requirements as output
+- Validate the received response
+  - Create a TCI in JIRA
+- Store in 'Regulatory Reporting Requirements' datastore
+
+**Stage 3**
+- Extract Data Validation Rules.
+  - Fetch regulatory reporting requirements from Datastore
+  - Make Gemini API call by sending this content as input, receive list of regulatory reporting data validation rules as output
+- Validate the received response
+- Store in 'Data Validation Rules' datastore
+
+**Stage 4**
+- Extract Data Validation Functions.
+  - Fetch regulatory reporting data validation rules from Datastore
+  - Make Gemini API call by sending this content as input, receive list of python data validation functions as output
+- Validate the received response
+- Store in 'Data Validation Functions' datastore
+
+**Stage 5**
+- Extract tx dataset.
+- Apply data validation functions on dataset
+- Validation results generation
+- Refine validation results by iterating through historical data and manual override data.
+- Store results in 'Results' datastore
+
+**Stage 6**
+- Risk Scoring Model.
+- Apply historical data, manual override data, and User provided dataset
+- Store results in 'Model Training' datastore
+- API to fetch adpative risk scores.
+
+**Technology Consideration**
+- Gemini AI
+- Python and popular libraries
+- Google Cloud SQL (batch processing and user events)
+- Google Cloud Firestore (textual content storage)
+- Alloy DB (Model training data)
+- Google Data Flow (Pipeline)
+- React (UI & Chat Assistant)
+- Google Cloud Scheduler for batch processing
+- JIRA (integration for automated ticket creation in the event of any detected new/updated regulatory reporting requirements over a period in time)
