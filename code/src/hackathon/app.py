@@ -16,7 +16,7 @@ app = Flask(__name__)
 
 # Configure API key - in production, use environment variables
 # Google provides free credits for Gemini API
-client = genai.Client(api_key="AIzaSyCufTlSlTUnx81XekgXMfrRcAtULUGoMus")  # Replace with your Gemini API key
+client = genai.Client(api_key="")  # Replace with your Gemini API key
 
 UPLOAD_FOLDER = tempfile.mkdtemp()
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
